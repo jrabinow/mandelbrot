@@ -16,8 +16,9 @@
 
 // Mandelbrot Generator
 
+#include <float.h>
+#include <getopt.h>
 #include <pthread.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -129,7 +130,140 @@ void *threaded_mp(void *arg) {
   pthread_exit(NULL);
 }
 
-int main(int argc, char **argv) {
+void usage(const char *progname, FILE *stream) {
+  fprintf(
+      stream,
+      "Usage: %s [OPTION]...\n"
+      "\t--help\tdisplay this help message\n"
+      "\t-h, --hp ARG\thorizontal pixels - int\n"
+      "\t-v, --vp ARG\tvertical pixels - int\n"
+      "\t-r, --ri LOW:HIGH\tlow/high interval for real numbers - float:float\n"
+      "\t-c, --ci LOW:HIGH\tlow/high interval for complex numbers - "
+      "float:float\n"
+      "\t-i, --iter\tnumber of iterations - int\n"
+      "\t-o, --output\tfilepath to save image to - file path\n"
+      "\t-t\t\tnumber of threads to use\n",
+      progname);
+}
+
+typedef struct {
+  unsigned xres, yres, maxit;
+  float rlo, rhi, ilo, ihi;
+  char *output;
+  char *palette;
+  int optind;
+  unsigned threads;
+} ParsedArgs;
+
+ParsedArgs parse_args(int argc, char *argv[]) {
+  ParsedArgs parsed_args = {0,
+                            0,
+                            0,
+                            FLT_MAX,
+                            FLT_MAX,
+                            FLT_MAX,
+                            FLT_MAX,
+                            "output.bmp",
+                            "palette",
+                            0,
+                            sysconf(_SC_NPROCESSORS_ONLN)};
+  int c, option_index = 0;
+  char *endptr;
+
+  static struct option longopts[] = {
+      {"help", no_argument, NULL, 'g'}, // we use 'g' because 'h' already taken
+      {"hp", required_argument, NULL, 'h'},
+      {"vp", required_argument, NULL, 'v'},
+      {"ri", required_argument, NULL, 'r'},
+      {"ci", required_argument, NULL, 'c'},
+      {"iter", required_argument, NULL, 'i'},
+      {"output", required_argument, NULL, 'o'},
+      {"palette", required_argument, NULL, 'p'},
+      {"threads", required_argument, NULL, 't'},
+      {NULL, 0, NULL, 0}};
+
+  /* optstring is a string containing the legitimate option characters. If
+   * such a character is followed by a colon, the option requires an argument,
+   * Two colons mean an option takes an optional arg */
+  while ((c = getopt_long(argc, argv, "h:v:r:c:i:n:o:p:t:", longopts,
+                          &option_index)) != -1) {
+    switch (c) {
+    case 'g':
+      usage(argv[0], stdout);
+      exit(EXIT_SUCCESS);
+    case 'h':
+      parsed_args.xres = strtol(optarg, &endptr, 0);
+      if (*endptr != '\0') {
+        usage(argv[0], stderr);
+        exit(EXIT_FAILURE);
+      }
+      break;
+    case 'v':
+      parsed_args.yres = strtol(optarg, &endptr, 0);
+      if (*endptr != '\0') {
+        usage(argv[0], stderr);
+        exit(EXIT_FAILURE);
+      }
+      break;
+    case 'r':
+      parsed_args.rlo = strtof(optarg, &endptr);
+      if (*endptr != ':') {
+        usage(argv[0], stderr);
+        exit(EXIT_FAILURE);
+      }
+      optarg = endptr + 1;
+      parsed_args.rhi = strtof(optarg, &endptr);
+      if (*endptr != '\0') {
+        usage(argv[0], stderr);
+        exit(EXIT_FAILURE);
+      }
+      break;
+    case 'c':
+      parsed_args.ilo = strtof(optarg, &endptr);
+      if (*endptr != ':') {
+        usage(argv[0], stderr);
+        exit(EXIT_FAILURE);
+      }
+      optarg = endptr + 1;
+      parsed_args.ihi = strtof(optarg, &endptr);
+      if (*endptr != '\0') {
+        usage(argv[0], stderr);
+        exit(EXIT_FAILURE);
+      }
+      break;
+    case 'i':
+      parsed_args.maxit = strtol(optarg, &endptr, 0);
+      if (*endptr != '\0') {
+        usage(argv[0], stderr);
+        exit(EXIT_FAILURE);
+      }
+      break;
+    case 't':
+      parsed_args.threads = strtol(optarg, &endptr, 0);
+      if (*endptr != '\0') {
+        usage(argv[0], stderr);
+        exit(EXIT_FAILURE);
+      }
+      break;
+    case 'o':
+      parsed_args.output = optarg;
+      break;
+    case 'p':
+      parsed_args.palette = optarg;
+      break;
+    case ':':
+      fputs("missing argument", stderr);
+    default:
+      usage(argv[0], stderr);
+      exit(EXIT_FAILURE);
+    }
+  }
+  parsed_args.optind = optind;
+
+  return parsed_args;
+}
+
+int main(int argc, char *argv[]) {
   int i, index, ncolor, *c, n, maxit, pad;
   unsigned int xres, yres;
   unsigned int *tr, *tg, *tb, buf, filesize;
@@ -138,11 +272,10 @@ int main(int argc, char **argv) {
   unsigned char *framebuffer;
   Thread_arg *ta;
   Global_var gv;
-
-  (void)argc, (void)argv;
+  ParsedArgs args = parse_args(argc, argv);
 
   // Determine how many colors in color palette.
-  if ((fp = fopen("palette", "r")) == NULL) {
+  if ((fp = fopen(args.palette, "r")) == NULL) {
     perror("Error opening palette file");
     exit(EXIT_FAILURE);
   }
@@ -150,7 +283,7 @@ int main(int argc, char **argv) {
   while ((n = fgetc(fp)) != EOF)
     if (n == '\n')
       ncolor++;
-  fclose(fp);
+  rewind(fp);
 
   // Allocate memory for color palette.
   if ((tr = (unsigned int *)malloc(ncolor * sizeof(unsigned int))) == NULL) {
@@ -170,19 +303,30 @@ int main(int argc, char **argv) {
   memset(tb, 0, ncolor * sizeof(unsigned int));
 
   // Read in color palette.
-  if ((fp = fopen("palette", "r")) == NULL) {
+  if ((fp = fopen(args.palette, "r")) == NULL) {
     perror("Error opening palette file");
     exit(EXIT_FAILURE);
   }
+
   for (i = 0; i < ncolor; i++)
     fscanf(fp, "%*u %u %u %u", &tr[i], &tg[i], &tb[i]);
   fclose(fp);
 
   // Ask for image dimensions(px).
-  printf("What is the horizontal dimension(px) ?\n");
-  scanf("%u", &xres);
-  printf("What is the vertical dimension(px) ?\n");
-  scanf("%u", &yres);
+  if (args.xres == 0) {
+    do {
+      printf("What is the horizontal dimension(px) ?\n");
+    } while (scanf("%u", &xres) == 0);
+  } else {
+    xres = args.xres;
+  }
+  if (args.yres == 0) {
+    do {
+      printf("What is the vertical dimension(px) ?\n");
+    } while (scanf("%u", &yres) == 0);
+  } else {
+    yres = args.yres;
+  }
   framebuffer =
       (unsigned char *)malloc(3 * xres * yres * sizeof(unsigned char));
 
@@ -191,23 +335,48 @@ int main(int argc, char **argv) {
   memset(c, 0, xres * yres * sizeof(int));
 
   // Ask for range on real scale
-  printf("What is the lowest real value ?\n");
-  scanf("%lf", &rlo);
-  printf("What is the highest real value ?\n");
-  scanf("%lf", &rhi);
+  if (args.rlo == FLT_MIN || args.rlo == FLT_MAX || args.rlo != args.rlo) {
+    do {
+      printf("What is the lowest real value ?\n");
+    } while (scanf("%lf", &rlo) == 0);
+  } else {
+    rlo = args.rlo;
+  }
+  if (args.rhi == FLT_MIN || args.rhi == FLT_MAX || args.rhi != args.rhi) {
+    do {
+      printf("What is the highest real value ?\n");
+    } while (scanf("%lf", &rhi) == 0);
+  } else {
+    rhi = args.rhi;
+  }
 
   // Ask for range on imaginary scale.
-  printf("What is the lowest imaginary value ?\n");
-  scanf("%lf", &ilo);
-  printf("What is the highest imaginary value ?\n");
-  scanf("%lf", &ihi);
+  if (args.ilo == FLT_MIN || args.ilo == FLT_MAX || args.ilo != args.ilo) {
+    do {
+      printf("What is the lowest imaginary value ?\n");
+    } while (scanf("%lf", &ilo) == 0);
+  } else {
+    ilo = args.ilo;
+  }
+  if (args.ihi == FLT_MIN || args.ihi == FLT_MAX || args.ihi != args.ihi) {
+    do {
+      printf("What is the highest imaginary value ?\n");
+    } while (scanf("%lf", &ihi) == 0);
+  } else {
+    ihi = args.ihi;
+  }
 
   // Ask for maximum allowable number of iterations.
-  printf("\nWhat is the maximum allowable number of iterations ?\n");
-  scanf("%i", &maxit);
+  if (args.maxit == 0) {
+    do {
+      printf("\nWhat is the maximum allowable number of iterations ?\n");
+    } while (scanf("%i", &maxit) == 0);
+  } else {
+    maxit = args.maxit;
+  }
 
   // Open output file.
-  fo = fopen("output.bmp", "wb");
+  fo = fopen(args.output, "wb");
   if (fo == NULL) {
     printf("Can't open new bitmap file.\n");
     exit(EXIT_FAILURE);
@@ -230,7 +399,7 @@ int main(int argc, char **argv) {
   // Pixels are in(x,y) plane.
 
   /* start threaded mandlebrot construction */
-  index = sysconf(_SC_NPROCESSORS_ONLN);
+  index = args.threads;
   ta = (Thread_arg *)alloca(sizeof(Thread_arg) * index);
   gv.framebuffer = framebuffer;
   gv.rlo = rlo;

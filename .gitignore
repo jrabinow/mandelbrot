@@ -1,4 +1,3 @@
-output.bmp
-xmms-rootvis-0.0.8
-build/mp
-src/orig/mp
+*.swp
+/build/mp
+*.bmp
